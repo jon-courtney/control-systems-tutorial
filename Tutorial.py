@@ -19,8 +19,9 @@ F_max = 10000       # 10,000 N
 mps_to_mph  = 2.237 # 1 m/s = ~2.237 miles/hr
 mps_to_kmph = 3.6   # 1 m/2 = 3.6 km/hr
 g = 9.80665         # Gravitational acceleration in m/s^2
-interval = 1000     # 1,000 ms = 1 s
-y_max    = 140      # 140 mph
+interval = 100      # 100 ms
+dt = interval/1000  # 0.1 s
+max_speed = 150      # 140 mph
 setpoint = 29.0576  # 29.0576 m/s = 65 mph
 
 class Controller:
@@ -60,14 +61,15 @@ class PIDController(Controller):
         self.up, self.ui, self.ud = 0, 0, 0
         
     def get_output(self, e):
-        self.cum_error += e
-        d = e - self.e_prev
+        # if np.sign(e) != np.sign(self.e_prev):
+        #     self.cum_error = 0
+        self.cum_error += e*dt
+        d = (e - self.e_prev)/dt
         self.e_prev = e
         self.up = self.kp * e
         self.ui = self.ki * self.cum_error
         self.ud = self.kd * d
-        output = self.up + self.ui + self.ud
-        return np.clip(output, 0, 1.0)
+        return self.up + self.ui + self.ud
 
     def set_kp(self, k):
         self.kp = k
@@ -95,28 +97,30 @@ class System:
         self.controller = controller
     
     def init_terrain(self):
-        slope = np.repeat([0, 0.5, 0, -0.25, 0, 0.25, -0.5], [5, 5, 5, 10, 5, 10, 5])
+        slope = np.repeat([0, 0.5, 0, -0.25, 0, 0.25, -0.5], [2, 2, 2, 1, 2, 1, 2])
         return np.tile(slope, 10)
 
     def get_controller_output(self, e):
         return self.controller.get_output(e)
 
     def get_slope(self, d):
-        index = int(d/100) % len(self.terrain)
+        index = int(d/100) % len(self.terrain)  ### This constant should probably not be here
         return self.terrain[index]
 
     def calc_F_terrain(self, d):
         return np.sin(np.arctan(self.get_slope(self.d))) * g * mass  # Backward force due to gravity
 
     def update_system(self, t, system_input):
-        F_engine  = system_input * F_max         # Forward force due to engine
-        F_drag    = 0.5 * self.v**2 * area       # Backward force due to aero drag
+        F_engine  = system_input * F_max                       # Forward force due to engine
+        F_drag    = 0.5 * self.v**2 * area * np.sign(self.v)   # Backward force due to aero drag
         if self.options.elevation:
             F_terrain = self.calc_F_terrain(self.d)  # Backward force due to slope of terrain
         else:
             F_terrain = 0.0
-        self.v += (F_engine - F_drag - F_terrain)/mass
-        self.d += self.v
+        F = F_engine - F_drag - F_terrain
+        self.v += F/mass
+        self.d += self.v*dt
+        print("v={:.4f}, d={:.4f}, F={:.4f}".format(self.v, self.d, F))
         self.elev += self.v * self.get_slope(self.d)
         return self.v
 
@@ -149,7 +153,7 @@ class ScrollingGraph:
         
         if x > xmax:
             self.ax.set_xlim(xmin+(x-xmax), x)
-            self.ax.figure.canvas.draw_idle()
+            #self.ax.figure.canvas.draw_idle()
         
         if y < ymin:
             self.ax.set_ylim(y*1.1, ymax)
@@ -172,10 +176,10 @@ class Display:
         self.ui_graph = None
         self.ud_graph = None
         self.gain_slider = None
-        self.ani = None
+        self.animation = None
         self.system = system
         self.options = options
-        self.started = False
+        self.paused = True
         
         self.root = tk.Tk()
         self.root.wm_title("Car Simulation")
@@ -186,32 +190,27 @@ class Display:
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
         self.canvas.get_tk_widget().grid(column=0,row=0)
 
-        gs_kw = dict(height_ratios=[2, 2, 2, 1, 0.5, 0.5])
+        gs_kw = dict(height_ratios=[2, 2, 1, 0.5, 0.5])
         self.axd = axd = self.fig.subplot_mosaic([['velocity', 'velocity', 'velocity'],
-                                                  ['error', 'error', 'error'],
                                                   ['elevation', 'elevation', 'elevation'],
                                                   ['up', 'ui', 'ud'],
                                                   ['Kp', 'Ki', 'Kd'],
                                                   ['start', 'gain', 'gain']],
                                                   gridspec_kw=gs_kw)
 
-        # self.axd = axd = self.fig.subplot_mosaic([['velocity'],
-        #                                          ['elevation'],
-        #                                          ['gain']])
-
         self.velocity_graph = ScrollingGraph(axd['velocity'], 'Time [s]', (0, 20),
-                                            'Velocity [mi/hr]', (-10, y_max),
+                                            'Velocity [mi/hr]', (-10, max_speed),
                                             target=setpoint*mps_to_mph)
 
-        self.error_graph = ScrollingGraph(axd['error'], 'Time [s]', (0, 20),
-                                             'Error', (-20, 80), target=0.0)
+        # self.error_graph = ScrollingGraph(axd['error'], 'Time [s]', (0, 20),
+        #                                      'Error', (-20, 80), target=0.0)
 
         self.elevation_graph = ScrollingGraph(axd['elevation'], 'Time [s]', (0, 20),
-                                             'Elevation [m]', (-10.0, 100))
+                                             'Elevation [m]', (-10.0, 1100))
 
-        self.up_graph = ScrollingGraph(axd['up'], 'Time [s]', (0, 20), 'up', (-3.0, 3))
-        self.ui_graph = ScrollingGraph(axd['ui'], 'Time [s]', (0, 20), 'ui', (-3.0, 3))
-        self.ud_graph = ScrollingGraph(axd['ud'], 'Time [s]', (0, 20), 'ud', (-3.0, 3))
+        self.up_graph = ScrollingGraph(axd['up'], 'Time [s]', (0, 20), 'up', (-1, 1))
+        self.ui_graph = ScrollingGraph(axd['ui'], 'Time [s]', (0, 20), 'ui', (-1, 1))
+        self.ud_graph = ScrollingGraph(axd['ud'], 'Time [s]', (0, 20), 'ud', (-1, 1))
 
         self.kp_text = TextBox(axd['Kp'], "Kp")
         self.kp_text.on_submit(self.kp_submit)
@@ -239,10 +238,13 @@ class Display:
         )
         self.gain_slider.on_changed(self.set_gain)
 
-        self.start_button = Button(axd['start'], 'Start', hovercolor='green')
-        self.start_button.on_clicked(self.start_animation)
+        self.start_button = Button(axd['start'], 'Start / Stop', hovercolor='green')
+        self.start_button.on_clicked(self.toggle_animation)
 
         axd['elevation'].set_visible(False)
+        axd['up'].set_visible(False)
+        axd['ui'].set_visible(False)
+        axd['ud'].set_visible(False)
         axd['Kp'].set_visible(False)
         axd['Ki'].set_visible(False)
         axd['Kd'].set_visible(False)
@@ -252,12 +254,15 @@ class Display:
             axd['elevation'].set_visible(True)
 
         if self.options.kp:
+            axd['up'].set_visible(True)
             axd['Kp'].set_visible(True)
 
         if self.options.ki:
+            axd['ui'].set_visible(True)
             axd['Ki'].set_visible(True)
 
         if self.options.kd:
+            axd['ud'].set_visible(True)
             axd['Kd'].set_visible(True)
 
         if self.options.gain:
@@ -265,29 +270,47 @@ class Display:
 
         self.fig.tight_layout()
     
-    def data_gen(self, t=0):
-        e = 0
+    def data_gen(self, step=0):
         v = 0
         while True:
-            t += 1
+            step += 1
             e = setpoint - v
-            system_input = self.system.get_controller_output(e)
+            t = step*dt
+            system_input = np.clip(self.system.get_controller_output(e), 0, 1.0)
             up, ui, ud = self.system.controller.get_pid_outputs()
             v = self.system.update_system(t, system_input)
-            yield t, v*mps_to_mph, self.system.elev, setpoint-v, up, ui, ud
+            yield t, v*mps_to_mph, self.system.elev, e, up, ui, ud
 
     def init(self):
-        return self.velocity_graph.append(0, 0), self.error_graph.append(0, 0), self.elevation_graph.append(0, 0), \
+        return self.velocity_graph.append(0, 0), self.elevation_graph.append(0, 0), \
                self.up_graph.append(0, 0), self.ui_graph.append(0, 0), self.ud_graph.append(0, 0)
 
     def run(self, data):
         t, v, l, e, up, ui, ud = data
-        return self.velocity_graph.append(t, v), \
-               self.error_graph.append(t, e), \
-               self.elevation_graph.append(t, l), \
-               self.up_graph.append(t, np.clip(up, -3, 3)), \
-               self.ui_graph.append(t, np.clip(ui, -3, 3)), \
-               self.ud_graph.append(t, np.clip(ud, -3, 3))
+        print("{:.2f}, {:.2f}, {:.2f}, {:.2f}".format(e, up, ui, ud))
+
+        self.velocity_graph.append(t, v)
+        # self.error_graph.append(t, e)
+        self.elevation_graph.append(t, l)
+        self.up_graph.append(t, np.clip(up, -1, 1))
+        self.ui_graph.append(t, np.clip(ui, -1, 1))
+        self.ud_graph.append(t, np.clip(ud, -1, 1))
+
+        artists = [self.velocity_graph.line]
+
+        if self.options.elevation:
+            artists.append(self.elevation_graph.line)
+
+        if self.options.kp:
+            artists.append(self.up_graph.line)
+
+        if self.options.ki:
+            artists.append(self.ui_graph.line)
+
+        if self.options.kd:
+            artists.append(self.ud_graph.line)
+
+        return artists
 
 
     def kp_submit(self, text):
@@ -300,17 +323,27 @@ class Display:
         self.system.controller.set_kd(float(text))
 
     def set_gain(self, val):
-        if self.options.one_shot and not self.started:
+        if self.options.one_shot and self.paused:
             self.system.controller.set_gain(val)
         elif self.options.gain and not self.options.one_shot:
             self.system.controller.set_gain(val)
         self.fig.canvas.draw_idle()
 
-    def start_animation(self, event):
-        if not self.started:
-            self.ani = animation.FuncAnimation(self.fig, self.run, self.data_gen, blit=False,
-                                               interval=interval, repeat=False, init_func=self.init)
-            self.started = True
+    def toggle_animation(self, event):
+        if self.animation == None:
+            self.animation = animation.FuncAnimation(self.fig, self.run, frames=self.data_gen, blit=True,
+                                                     interval=interval, repeat=False, init_func=self.init)
+            self.paused = False
+            self.start_button.hovercolor = 'red'
+        else:
+            if self.paused:
+                self.animation.resume()
+                self.start_button.hovercolor = 'red'
+            else:
+                self.animation.pause()
+                self.start_button.hovercolor = 'green'
+                self.canvas.draw_idle()
+            self.paused = not self.paused
 
     def show(self):
         plt.show()
@@ -325,23 +358,22 @@ class Options:
     gain = False
 
 def main(args):
+    valid_args = ['basic', 'disturbance', 'p_control', 'pi_control', 'pid_control']
+
     if (len(args)<2):
         print("Usage: {} mode".format(args[0]))
         sys.exit(1)
 
-    if args[1] not in ['feedforward', 'feedback', 'uncertainty', 'p_control', 'pi_control', 'pid_control']:
+    if args[1] not in valid_args:
         print("Invalid argument")
         sys.exit(1)
 
     mode = args[1]
     options = Options()
 
-    if mode=='feedforward':
-        options.one_shot = True
+    if mode=='basic':
         options.gain = True
-    elif mode=='feedback':
-        options.gain = True
-    elif mode=='uncertainty':
+    elif mode=='disturbance':
         options.gain = True
         options.elevation = True
     elif mode=='p_control':
