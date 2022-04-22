@@ -361,7 +361,7 @@ def main(args):
     valid_args = ['basic', 'disturbance', 'p_control', 'pi_control', 'pid_control']
 
     if (len(args)<2):
-        print("Usage: {} mode".format(args[0]))
+        print("Usage: {} {}".format(args[0], valid_args))
         sys.exit(1)
 
     if args[1] not in valid_args:
